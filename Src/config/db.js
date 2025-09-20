@@ -1,13 +1,14 @@
+// مثال مبسّط للـ connection caching
 import mongoose from "mongoose";
 
-const connectDB = async () => {
-  try {
-    const conn = await mongoose.connect(process.env.MONGO_URI);
-    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
-  } catch (error) {
-    console.error(`❌ Error: ${error.message}`);
-    process.exit(1);
-  }
-};
+let cached = global._mongo; 
+if (!cached) cached = global._mongo = { conn: null, promise: null };
 
-export default connectDB;
+export default async function connectDB() {
+  if (cached.conn) return cached.conn;
+  if (!cached.promise) {
+    cached.promise = mongoose.connect(process.env.MONGO_URI, { /* options */ })
+      .then((m) => (cached.conn = m));
+  }
+  return cached.promise;
+}
