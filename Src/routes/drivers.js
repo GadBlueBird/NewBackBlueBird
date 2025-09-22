@@ -1,15 +1,19 @@
+// src/routes/drivers.js
 import express from "express";
 import path from "path";
 import fs from "fs";
 import Driver from "../models/Driver.js";
 import { fileURLToPath } from "url";
-import upload from "../middleware/upload.js";
+import { upload, handleUploadsAndUploadToCloudinary } from "../middleware/upload.js"; // named imports
+import { v2 as cloudinary } from "cloudinary"; // for deletion (optional)
+import dotenv from "dotenv";
+dotenv.config();
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// وظيفة مساعدة لتحليل JSON بشكل آمن
+// helper
 const safeParseJSON = (jsonString, defaultValue = undefined) => {
   try {
     return jsonString ? JSON.parse(jsonString) : defaultValue;
@@ -19,7 +23,6 @@ const safeParseJSON = (jsonString, defaultValue = undefined) => {
   }
 };
 
-// استخدام upload
 const cpUpload = upload.fields([
   { name: "personalImage", maxCount: 1 },
   { name: "personalLicense", maxCount: 10 },
@@ -28,25 +31,88 @@ const cpUpload = upload.fields([
   { name: "carImage", maxCount: 10 },
 ]);
 
-// Create driver
+// POST create driver
 router.post("/", cpUpload, async (req, res) => {
   try {
     const body = req.body;
     const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
 
-    const getFileUrl = (fileArr) => {
+    const useLocal =
+      process.env.NODE_ENV === "development" || process.env.USE_LOCAL_UPLOAD === "true";
+
+    // helpers to build local URLs (unchanged)
+    const getFileUrlLocal = (fileArr) => {
       if (!fileArr || !fileArr[0]) return null;
-      const rel = path.relative(path.join(__dirname, ".."), fileArr[0].path).replace(/\\/g, "/");
+      const rel = path
+        .relative(path.join(__dirname, ".."), fileArr[0].path)
+        .replace(/\\/g, "/");
       return `${baseUrl}/${rel}`;
     };
-
-    const getMultiUrls = (fileArr) => {
+    const getMultiUrlsLocal = (fileArr) => {
       if (!fileArr) return [];
       return fileArr.map((f) => {
         const rel = path.relative(path.join(__dirname, ".."), f.path).replace(/\\/g, "/");
         return `${baseUrl}/${rel}`;
       });
     };
+
+    // default values
+    let personalImageUrl = null;
+    let personalImagePublicId = null;
+    let personalLicenseUrls = [];
+    let personalLicensePublicIds = [];
+    let carLicenseUrls = [];
+    let carLicensePublicIds = [];
+    let idCardUrls = [];
+    let idCardPublicIds = [];
+    let carImagesUrls = [];
+    let carImagesPublicIds = [];
+
+    if (useLocal) {
+      // files were stored on disk
+      personalImageUrl = req.files?.personalImage ? getFileUrlLocal(req.files.personalImage) : null;
+      personalLicenseUrls = req.files?.personalLicense ? getMultiUrlsLocal(req.files.personalLicense) : [];
+      carLicenseUrls = req.files?.carLicense ? getMultiUrlsLocal(req.files.carLicense) : [];
+      idCardUrls = req.files?.idCard ? getMultiUrlsLocal(req.files.idCard) : [];
+      carImagesUrls = req.files?.carImage ? getMultiUrlsLocal(req.files.carImage) : [];
+    } else {
+      // production: files are in memory => upload to Cloudinary
+      const allFiles = [];
+      Object.values(req.files || {}).forEach((arr) => arr.forEach((f) => allFiles.push(f)));
+
+      if (allFiles.length) {
+        const results = await handleUploadsAndUploadToCloudinary(allFiles, {
+          folder: "bluebird_uploads",
+        });
+        // results: [{ fieldname, originalname, url, raw }]
+        const byField = {};
+        results.forEach((r) => {
+          if (!byField[r.fieldname]) byField[r.fieldname] = [];
+          byField[r.fieldname].push(r);
+        });
+
+        if (byField.personalImage && byField.personalImage[0]) {
+          personalImageUrl = byField.personalImage[0].url;
+          personalImagePublicId = byField.personalImage[0].raw?.public_id || null;
+        }
+        if (byField.personalLicense) {
+          personalLicenseUrls = byField.personalLicense.map((x) => x.url);
+          personalLicensePublicIds = byField.personalLicense.map((x) => x.raw?.public_id || null);
+        }
+        if (byField.carLicense) {
+          carLicenseUrls = byField.carLicense.map((x) => x.url);
+          carLicensePublicIds = byField.carLicense.map((x) => x.raw?.public_id || null);
+        }
+        if (byField.idCard) {
+          idCardUrls = byField.idCard.map((x) => x.url);
+          idCardPublicIds = byField.idCard.map((x) => x.raw?.public_id || null);
+        }
+        if (byField.carImage) {
+          carImagesUrls = byField.carImage.map((x) => x.url);
+          carImagesPublicIds = byField.carImage.map((x) => x.raw?.public_id || null);
+        }
+      }
+    }
 
     const driverData = {
       name: body.name,
@@ -72,11 +138,20 @@ router.post("/", cpUpload, async (req, res) => {
       carOwnerPhone: body.carOwnerPhone || "",
       route: safeParseJSON(body.route),
       additionalShifts: safeParseJSON(body.additionalShifts, []),
-      personalImageUrl: req.files?.personalImage ? getFileUrl(req.files.personalImage) : null,
-      personalLicenseUrls: req.files?.personalLicense ? getMultiUrls(req.files.personalLicense) : [],
-      carLicenseUrls: req.files?.carLicense ? getMultiUrls(req.files.carLicense) : [],
-      idCardUrls: req.files?.idCard ? getMultiUrls(req.files.idCard) : [],
-      carImagesUrls: req.files?.carImage ? getMultiUrls(req.files.carImage) : [],
+
+      // urls
+      personalImageUrl,
+      personalLicenseUrls,
+      carLicenseUrls,
+      idCardUrls,
+      carImagesUrls,
+
+      // optional: store public ids to allow cloud deletion later
+      personalImagePublicId,
+      personalLicensePublicIds,
+      carLicensePublicIds,
+      idCardPublicIds,
+      carImagesPublicIds,
     };
 
     const driver = new Driver(driverData);
@@ -88,64 +163,56 @@ router.post("/", cpUpload, async (req, res) => {
   }
 });
 
-// Get all drivers
-router.get("/", async (req, res) => {
-  try {
-    const { page = 1, limit = 50 } = req.query;
-    const drivers = await Driver.find()
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
-    res.json({ success: true, drivers });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// Get single driver by id
-router.get("/:id", async (req, res) => {
-  try {
-    const d = await Driver.findById(req.params.id);
-    if (!d) return res.status(404).json({ success: false, message: "Not found" });
-    res.json({ success: true, driver: d });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// Delete driver and files
+// DELETE route: handle both local & cloud files
 router.delete("/:id", async (req, res) => {
   try {
     const driver = await Driver.findById(req.params.id);
-
-    if (!driver) {
-      return res.status(404).json({ success: false, message: "السائق غير موجود" });
-    }
+    if (!driver) return res.status(404).json({ success: false, message: "السائق غير موجود" });
 
     const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
+    const useLocal = process.env.NODE_ENV === "development" || process.env.USE_LOCAL_UPLOAD === "true";
 
-    const deleteFile = async (fileUrl) => {
+    const deleteLocalFile = async (fileUrl) => {
       if (!fileUrl) return;
       try {
         const filePath = fileUrl.replace(baseUrl + "/", "");
         const fullPath = path.join(__dirname, "..", filePath);
         if (fs.existsSync(fullPath)) {
           await fs.promises.unlink(fullPath);
-          console.log(`تم حذف الملف: ${filePath}`);
+          console.log(`تم حذف الملف محليًا: ${fullPath}`);
         }
       } catch (error) {
-        console.error(`فشل في حذف الملف: ${fileUrl}`, error);
+        console.error("فشل حذف ملف محلي:", error);
       }
     };
 
-    await deleteFile(driver.personalImageUrl);
-    for (const url of driver.personalLicenseUrls) await deleteFile(url);
-    for (const url of driver.carLicenseUrls) await deleteFile(url);
-    for (const url of driver.idCardUrls) await deleteFile(url);
-    for (const url of driver.carImagesUrls) await deleteFile(url);
+    const deleteCloudFile = async (publicId) => {
+      if (!publicId) return;
+      try {
+        await cloudinary.uploader.destroy(publicId, { resource_type: "auto" });
+        console.log(`تم حذف الملف من Cloudinary: ${publicId}`);
+      } catch (error) {
+        console.error("فشل حذف ملف من Cloudinary:", error);
+      }
+    };
+
+    // delete single and arrays accordingly
+    if (useLocal) {
+      await deleteLocalFile(driver.personalImageUrl);
+      for (const url of driver.personalLicenseUrls || []) await deleteLocalFile(url);
+      for (const url of driver.carLicenseUrls || []) await deleteLocalFile(url);
+      for (const url of driver.idCardUrls || []) await deleteLocalFile(url);
+      for (const url of driver.carImagesUrls || []) await deleteLocalFile(url);
+    } else {
+      // prefer deleting by public_id if stored
+      if (driver.personalImagePublicId) await deleteCloudFile(driver.personalImagePublicId);
+      for (const id of driver.personalLicensePublicIds || []) await deleteCloudFile(id);
+      for (const id of driver.carLicensePublicIds || []) await deleteCloudFile(id);
+      for (const id of driver.idCardPublicIds || []) await deleteCloudFile(id);
+      for (const id of driver.carImagesPublicIds || []) await deleteCloudFile(id);
+    }
 
     await Driver.findByIdAndDelete(req.params.id);
-
     res.json({ success: true, message: "تم حذف السائق وكل ملفاته بنجاح" });
   } catch (err) {
     console.error("Error deleting driver:", err);
