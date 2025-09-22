@@ -1,21 +1,16 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
   "scripts": {
-    "build": "npm install",
     "dev": "nodemon src/api/index.js",
     "start": "node src/api/index.js"
   },
   "engines": {
-    "node": "22.12.0",
-    "npm": "10.9.0"
+    "node": ">=18"
   },
-  "keywords": [],
   "author": "Gad Ali",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
